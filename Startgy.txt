@@ -1,0 +1,32 @@
+Crypto Scalping Strategy (5-Minute Timeframe)
+Timeframe
+5-minute chart
+Indicators Used
+9 EMA (Exponential Moving Average)
+15 EMA (Exponential Moving Average)
+Buy Conditions
+
+Generate a Buy Signal when all the following conditions are met:
+
+The 9 EMA crosses above the 15 EMA (bullish crossover).
+At the crossover point, the angle/slope of the EMA movement is 30° or greater, indicating sufficient momentum.
+The market should not be in a sideways or low-volatility condition.
+Sell Conditions
+
+Generate a Sell Signal when all the following conditions are met:
+
+The 15 EMA crosses above the 9 EMA (bearish crossover), or equivalently, the 9 EMA crosses below the 15 EMA.
+At the crossover point, the angle/slope of the EMA movement is 30° or greater, confirming strong bearish momentum.
+The market should not be in a sideways or ranging condition.
+Sideways Market Filter
+
+The bot must avoid generating signals during sideways (ranging) market conditions. Signals should only be triggered when the market shows a clear trend with sufficient momentum.
+
+Strategy Objective
+
+The strategy is designed for crypto scalping, aiming to capture short-term price movements using EMA crossovers combined with momentum (angle) confirmation while filtering out false signals in sideways markets.
+
+Bot Logic Summary
+Buy → 9 EMA crosses above 15 EMA + angle ≥ 30° + market not sideways
+Sell → 9 EMA crosses below 15 EMA + angle ≥ 30° + market not sideways
+No Trade → Sideways/ranging market detected

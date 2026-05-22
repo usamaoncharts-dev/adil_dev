@@ -1,0 +1,12 @@
+Timeframes: 15M, 1H, and 4H
+I need an indicator that detects Order Blocks on the chart. When the price returns and taps a previously formed Order Block:
+
+If it is a Bullish Order Block, generate a Buy signal.
+If it is a Bearish Order Block, generate a Sell signal.
+
+Additionally, when a new Order Block is initially formed:
+
+Display a “B” signal for a Bullish Order Block.
+Display an “S” signal for a Bearish Order Block.
+
+The indicator should work across 15-minute, 1-hour, and 4-hour timeframes.

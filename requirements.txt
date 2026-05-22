@@ -1,0 +1,5 @@
+python-dotenv
+python-binance
+pandas>=2.0
+numpy
+streamlit

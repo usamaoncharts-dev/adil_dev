@@ -1,0 +1,850 @@
+//@version=6
+indicator("Order Block Matrix Trade Engine [Alpha Extract]", overlay=true, max_bars_back=5000, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
+formatVolume(vol) =>
+    vol >= 1000000 ? str.tostring(math.round(vol / 1000000, 2)) + "M" :
+         vol >= 1000 ? str.tostring(math.round(vol / 1000, 2)) + "K" :
+         str.tostring(math.round(vol, 2))
+
+// === ORDER BLOCKS INPUTS ===
+obLookback = input.int(10, "Order Block Breadth", minval=1, group="Order Blocks")
+obmode = input.string("Full", "Method", options=["Breadth", "Full"],
+     tooltip="[Breadth] Use Breadth to adjust coordinate of the orderblocks\n[Full] Use whole candle body", group="Order Blocks")
+obmiti = input.string("Close", "Risk Method", options=["Close", "Wick"],
+     tooltip="Risk method for when to trigger order blocks", group="Order Blocks")
+obMaxBlocks = input.int(6, "Maximum Order Blocks", minval=1, maxval=500, group="Order Blocks")
+
+windowsis = input.bool(true, "Window Mode", group="Order Blocks")
+mswindow = input.int(1000, "Window Bars", minval=100, maxval=5000, group="Order Blocks")
+
+amountOfBoxes = input.int(13, "Mountain Detail", minval=5, maxval=30, group="Visual Settings")
+showBorder = input.bool(true, "Show Block Borders", group="Visual Settings")
+borderWidth = input.int(1, "Border Width", minval=0, maxval=4, group="Visual Settings")
+showVolume = input.bool(true, "Show OB Volume Badge", group="Visual Settings")
+railWidth = input.float(0.22, "Mountain Width", minval=0.05, maxval=0.50, step=0.01, group="Visual Settings")
+mountainHeight = input.float(0.82, "Mountain Height", minval=0.20, maxval=1.00, step=0.01, group="Visual Settings")
+
+obHighVolumeColor = color.new(#00c2a8, 18)
+obLowVolumeColor = color.new(#00c2a8, 18)
+obBearHighVolumeColor = color.new(#ff3b58, 18)
+obBearLowVolumeColor = color.new(#ff3b58, 18)
+obBullBorderColor = color.new(#00c2a8, 8)
+obBearBorderColor = color.new(#ff3b58, 8)
+obBullFillColor = color.new(#00c2a8, 91)
+obBearFillColor = color.new(#ff3b58, 91)
+volumeTextColor = input.color(color.white, "Volume Text Color", group="Visual Settings")
+
+// === TRADE ENGINE INPUTS ===
+grpTrade = "Trade Engine"
+trade_on = input.bool(true, "Enable OB Trade Engine", group=grpTrade)
+trade_triggerMode = input.string("Rejection", "Entry Trigger", options=["Touch", "Rejection"], group=grpTrade)
+trade_minStrength = input.float(1.0, "Min Volume Strength", minval=0.1, step=0.1, group=grpTrade)
+trade_rr = input.float(2.0, "Take Profit RR", minval=0.2, step=0.1, group=grpTrade)
+trade_slMode = input.string("Block Edge", "Stop Loss Mode", options=["Block Edge", "ATR"], group=grpTrade)
+trade_slAtr = input.float(1.5, "ATR Stop Multiplier", minval=0.1, step=0.1, group=grpTrade)
+trade_showVisuals = input.bool(true, "Show Trade Lines / Labels", group=grpTrade)
+trade_keepClosedVisuals = input.bool(false, "Keep Closed Trade Visuals", group=grpTrade)
+trade_extendBars = input.int(80, "Projection Bars", minval=10, maxval=300, group=grpTrade)
+
+grpStats = "Trade Stats"
+showTradeStats = input.bool(true, "Show Trade Stats", group=grpStats)
+statsPosition = input.string("Top Left", "Stats Position", options=["Top Left", "Top Right", "Bottom Left", "Bottom Right"], group=grpStats)
+
+f_pos(posText) =>
+    posText == "Top Left" ? position.top_left :
+         posText == "Top Right" ? position.top_right :
+         posText == "Bottom Left" ? position.bottom_left :
+         position.bottom_right
+
+tradeTableBg = color.new(color.black, 0)
+tradeHeaderBg = color.new(color.black, 0)
+tradeTitleCol = color.new(#ff4040, 0)
+tradeBorderCol = color.white
+tradeBuyCol = color.new(#089981, 0)
+tradeSellCol = color.new(#f23645, 0)
+tradeTxt = color.white
+tradeMuted = color.new(color.white, 28)
+
+f_tradeCell(table t, int c, int r, string txt, color txtCol, color bgCol) =>
+    table.cell(t, c, r, txt, text_color=txtCol, bgcolor=bgCol, text_size=size.normal)
+
+f_msToClock(ms) =>
+    totalSec = int(math.floor(ms / 1000))
+    hrs = int(math.floor(totalSec / 3600))
+    mins = int(math.floor((totalSec % 3600) / 60))
+    secs = totalSec % 60
+    str.tostring(hrs) + "h " + str.tostring(mins) + "m " + str.tostring(secs) + "s"
+
+// === ENHANCED ORDER BLOCK TYPE ===
+type orderBlock
+    array<box> boxArray
+    array<float> boxVolumes
+    float topValue
+    float botValue
+    int leftTime
+    int rightTime
+    string direction
+    float totalVolume
+    label volumeLabel
+    line volumeLine
+    bool mitigated
+    line topLine
+    line botLine
+    linefill bgFill
+    int touches
+
+var float atr = ta.atr(14)
+atr := ta.atr(14)
+
+var array<orderBlock> bullBlocks = array.new<orderBlock>()
+var array<orderBlock> bearBlocks = array.new<orderBlock>()
+
+var bool bull_touch = false
+var bool bear_touch = false
+var bool bull_reject = false
+var bool bear_reject = false
+var bool new_bull = false
+var bool new_bear = false
+
+bull_touch := false
+bear_touch := false
+bull_reject := false
+bear_reject := false
+new_bull := false
+new_bear := false
+
+generateBorderLines(orderBlock block, topValue, botValue) =>
+    if showBorder
+        borderColor = block.direction == "Bull" ? obBullBorderColor : obBearBorderColor
+        fillColor = block.direction == "Bull" ? obBullFillColor : obBearFillColor
+
+        newTopLine = line.new(
+             x1=block.leftTime,
+             y1=topValue,
+             x2=time,
+             y2=topValue,
+             xloc=xloc.bar_time,
+             extend=extend.none,
+             color=borderColor,
+             style=line.style_solid,
+             width=borderWidth)
+
+        newBotLine = line.new(
+             x1=block.leftTime,
+             y1=botValue,
+             x2=time,
+             y2=botValue,
+             xloc=xloc.bar_time,
+             extend=extend.none,
+             color=borderColor,
+             style=line.style_solid,
+             width=borderWidth)
+
+        newLineFill = linefill.new(newTopLine, newBotLine, fillColor)
+        [newTopLine, newBotLine, newLineFill]
+    else
+        [na, na, na]
+
+generateVolumeBoxes(orderBlock block, float orderVolume) =>
+    volumeArray = array.new_float(amountOfBoxes, 0)
+    boxesArray = array.new_box()
+    baseVolume = ta.sma(volume, 20)
+    strengthFactor = baseVolume > 0 ? math.max(0.45, math.min(1.0, 0.45 + (orderVolume / baseVolume) / 3.0)) : 0.70
+
+    for i = 0 to amountOfBoxes - 1
+        x = amountOfBoxes > 1 ? i / (amountOfBoxes - 1.0) : 0.5
+        peakA = math.exp(-math.pow((x - 0.38) / 0.22, 2))
+        peakB = math.exp(-math.pow((x - 0.72) / 0.16, 2)) * 0.58
+        ridge = math.max(0.08, math.min(1.0, (peakA + peakB + 0.10 * math.sin(i * 1.7)) * strengthFactor))
+        array.set(volumeArray, i, ridge)
+
+        shade = int(math.round(78 - ridge * 50))
+        accentColor = block.direction == "Bull" ? color.new(#00c2a8, shade) : color.new(#ff3b58, shade)
+
+        mountainBox = box.new(
+             left=time,
+             top=block.topValue,
+             right=time,
+             bottom=block.botValue,
+             border_color=color.new(accentColor, 100),
+             border_width=0,
+             xloc=xloc.bar_time,
+             bgcolor=accentColor,
+             extend=extend.none)
+
+        array.push(boxesArray, mountainBox)
+
+    [boxesArray, volumeArray, orderVolume]
+
+updateBoxes(orderBlock block, currentTime) =>
+    if array.size(block.boxArray) > 0
+        timeLength = currentTime - block.leftTime
+        railMaxWidth = math.max(1, math.round(timeLength * railWidth))
+        zoneHeight = block.topValue - block.botValue
+        columnCount = array.size(block.boxArray)
+        columnWidth = math.max(1, math.round(railMaxWidth / columnCount))
+        mountainLeft = currentTime - railMaxWidth
+
+        for i = 0 to columnCount - 1
+            ridge = i < array.size(block.boxVolumes) ? array.get(block.boxVolumes, i) : 0.20
+            peakHeight = zoneHeight * mountainHeight * ridge
+            selectedBox = array.get(block.boxArray, i)
+            leftX = mountainLeft + columnWidth * i
+            rightX = i == columnCount - 1 ? currentTime : leftX + columnWidth
+
+            box.set_left(selectedBox, leftX)
+            box.set_right(selectedBox, rightX)
+
+            if block.direction == "Bull"
+                box.set_top(selectedBox, block.botValue + peakHeight)
+                box.set_bottom(selectedBox, block.botValue)
+            else
+                box.set_top(selectedBox, block.topValue)
+                box.set_bottom(selectedBox, block.topValue - peakHeight)
+
+    if not na(block.topLine) and not na(block.botLine)
+        line.set_x2(block.topLine, currentTime)
+        line.set_x2(block.botLine, currentTime)
+
+    if not na(block.volumeLabel) and showVolume
+        blockCenter = (block.topValue + block.botValue) / 2
+        strength = ta.sma(volume, 20) > 0 ? block.totalVolume / ta.sma(volume, 20) : na
+        badgeText = (block.direction == "Bull" ? "BUY OB" : "SELL OB") + "\nVol " + formatVolume(block.totalVolume) + "\nStr " + (na(strength) ? "-" : str.tostring(strength, "#.##") + "x")
+        badgeColor = block.direction == "Bull" ? color.new(#006b5c, 12) : color.new(#8f1d2e, 12)
+        label.set_x(block.volumeLabel, currentTime)
+        label.set_y(block.volumeLabel, blockCenter)
+        label.set_text(block.volumeLabel, badgeText)
+        label.set_color(block.volumeLabel, badgeColor)
+        label.set_textcolor(block.volumeLabel, volumeTextColor)
+        label.set_style(block.volumeLabel, label.style_label_left)
+
+wipeBlock(orderBlock block) =>
+    if not na(block.topLine)
+        line.delete(block.topLine)
+    if not na(block.botLine)
+        line.delete(block.botLine)
+    if not na(block.bgFill)
+        linefill.delete(block.bgFill)
+
+    if not na(block.volumeLabel)
+        label.delete(block.volumeLabel)
+
+    if not na(block.volumeLine)
+        line.delete(block.volumeLine)
+
+    if array.size(block.boxArray) > 0
+        for i = array.size(block.boxArray) - 1 to 0
+            selectedBox = array.get(block.boxArray, i)
+            box.delete(selectedBox)
+
+checkObCondition(tuning) =>
+    bear = false
+    for i = tuning - 1 to 0
+        start = tuning - 1
+        if i == start
+            if close[i] <= open[i]
+                break
+        else
+            if close[i] > open[i]
+                break
+
+            if i == 0
+                bear := true
+
+    bull = false
+    for i = tuning - 1 to 0
+        start = tuning - 1
+        if i == start
+            if close[i] >= open[i]
+                break
+        else
+            if close[i] < open[i]
+                break
+
+            if i == 0
+                bull := true
+
+    bullAlt = (high[tuning] - low[tuning]) > atr[tuning] * 0.8 and close[tuning] > open[tuning] and low[tuning] < low[tuning + 1]
+    bearAlt = (high[tuning] - low[tuning]) > atr[tuning] * 0.8 and close[tuning] < open[tuning] and high[tuning] > high[tuning + 1]
+
+    [bear or bearAlt, bull or bullAlt]
+
+inWindowRange = windowsis ? bar_index > (last_bar_index - mswindow) : true
+processBar = inWindowRange or not windowsis
+
+if barstate.isfirst
+    if bullBlocks.size() > 0
+        for i = bullBlocks.size() - 1 to 0
+            block = bullBlocks.get(i)
+            wipeBlock(block)
+
+    if bearBlocks.size() > 0
+        for i = bearBlocks.size() - 1 to 0
+            block = bearBlocks.get(i)
+            wipeBlock(block)
+
+    bullBlocks.clear()
+    bearBlocks.clear()
+
+if processBar
+    [is_bearish, is_bullish] = checkObCondition(obLookback)
+
+    if barstate.isconfirmed
+        if is_bullish
+            new_bull := true
+
+            topValue = high[obLookback - 1]
+            botValue = obmode == "Breadth" ?
+               (low[obLookback - 1] + atr * 1) > high[obLookback - 1] ?
+                  high[obLookback - 1] : (low[obLookback - 1] + atr * 1) :
+               low[obLookback - 1]
+
+            leftTime = time[obLookback - 1]
+
+            createNewBlock = true
+            if bullBlocks.size() > 0
+                for i = bullBlocks.size() - 1 to 0
+                    block = bullBlocks.get(i)
+                    if math.max(block.botValue, botValue) <= math.min(block.topValue, topValue)
+                        wipeBlock(block)
+                        bullBlocks.remove(i)
+                        createNewBlock := true
+
+            if createNewBlock
+                orderVolume = volume[obLookback - 1]
+
+                newBlock = orderBlock.new(
+                     array.new_box(),
+                     array.new_float(amountOfBoxes, 0),
+                     topValue,
+                     botValue,
+                     leftTime,
+                     time,
+                     "Bull",
+                     orderVolume,
+                     na,
+                     na,
+                     false,
+                     na,
+                     na,
+                     na,
+                     0)
+
+                [topLine, botLine, bgFill] = generateBorderLines(newBlock, topValue, botValue)
+                newBlock.topLine := topLine
+                newBlock.botLine := botLine
+                newBlock.bgFill := bgFill
+
+                [boxArray, volumeArray, totalVolume] = generateVolumeBoxes(newBlock, orderVolume)
+                newBlock.boxArray := boxArray
+                newBlock.boxVolumes := volumeArray
+                newBlock.totalVolume := totalVolume
+
+                if showVolume
+                    blockCenter = (topValue + botValue) / 2
+                    strength = ta.sma(volume, 20) > 0 ? totalVolume / ta.sma(volume, 20) : na
+                    newBlock.volumeLabel := label.new(
+                         x=time,
+                         y=blockCenter,
+                         text="BUY OB\nVol " + formatVolume(totalVolume) + "\nStr " + (na(strength) ? "-" : str.tostring(strength, "#.##") + "x"),
+                         textcolor=volumeTextColor,
+                         color=color.new(#006b5c, 12),
+                         style=label.style_label_left,
+                         xloc=xloc.bar_time,
+                         size=size.small)
+                array.push(bullBlocks, newBlock)
+
+        if is_bearish
+            new_bear := true
+
+            topValue = obmode == "Breadth" ?
+               (high[obLookback - 1] - atr * 1) < low[obLookback - 1] ?
+                  low[obLookback - 1] : (high[obLookback - 1] - atr * 1) :
+               high[obLookback - 1]
+
+            botValue = low[obLookback - 1]
+            leftTime = time[obLookback - 1]
+
+            createNewBlock = true
+            if bearBlocks.size() > 0
+                for i = bearBlocks.size() - 1 to 0
+                    block = bearBlocks.get(i)
+                    if math.max(block.botValue, botValue) <= math.min(block.topValue, topValue)
+                        wipeBlock(block)
+                        bearBlocks.remove(i)
+                        createNewBlock := true
+
+            if createNewBlock
+                orderVolume = volume[obLookback - 1]
+
+                newBlock = orderBlock.new(
+                     array.new_box(),
+                     array.new_float(amountOfBoxes, 0),
+                     topValue,
+                     botValue,
+                     leftTime,
+                     time,
+                     "Bear",
+                     orderVolume,
+                     na,
+                     na,
+                     false,
+                     na,
+                     na,
+                     na,
+                     0)
+
+                [topLine, botLine, bgFill] = generateBorderLines(newBlock, topValue, botValue)
+                newBlock.topLine := topLine
+                newBlock.botLine := botLine
+                newBlock.bgFill := bgFill
+
+                [boxArray, volumeArray, totalVolume] = generateVolumeBoxes(newBlock, orderVolume)
+                newBlock.boxArray := boxArray
+                newBlock.boxVolumes := volumeArray
+                newBlock.totalVolume := totalVolume
+
+                if showVolume
+                    blockCenter = (topValue + botValue) / 2
+                    strength = ta.sma(volume, 20) > 0 ? totalVolume / ta.sma(volume, 20) : na
+                    newBlock.volumeLabel := label.new(
+                         x=time,
+                         y=blockCenter,
+                         text="SELL OB\nVol " + formatVolume(totalVolume) + "\nStr " + (na(strength) ? "-" : str.tostring(strength, "#.##") + "x"),
+                         textcolor=volumeTextColor,
+                         color=color.new(#8f1d2e, 12),
+                         style=label.style_label_left,
+                         xloc=xloc.bar_time,
+                         size=size.small)
+                array.push(bearBlocks, newBlock)
+
+    if bullBlocks.size() > 0
+        for i = bullBlocks.size() - 1 to 0
+            if i < bullBlocks.size()
+                block = bullBlocks.get(i)
+
+                if not block.mitigated
+                    mitigated = obmiti == "Close" ?
+                       math.min(close, open) < block.botValue :
+                       obmiti == "Wick" ?
+                          low < block.botValue :
+                          false
+
+                    if mitigated
+                        block.mitigated := true
+                        wipeBlock(block)
+                        bullBlocks.remove(i)
+                        continue
+
+                priceInside = close <= block.topValue and close >= block.botValue
+                rejected = low <= block.botValue and close >= block.botValue
+
+                if priceInside
+                    bull_touch := true
+                    block.touches += 1
+
+                if rejected
+                    bull_reject := true
+
+                updateBoxes(block, time)
+
+    if bearBlocks.size() > 0
+        for i = bearBlocks.size() - 1 to 0
+            if i < bearBlocks.size()
+                block = bearBlocks.get(i)
+
+                if not block.mitigated
+                    mitigated = obmiti == "Close" ?
+                       math.max(close, open) > block.topValue :
+                       obmiti == "Wick" ?
+                          high > block.topValue :
+                          false
+
+                    if mitigated
+                        block.mitigated := true
+                        wipeBlock(block)
+                        bearBlocks.remove(i)
+                        continue
+
+                priceInside = close <= block.topValue and close >= block.botValue
+                rejected = high >= block.topValue and close <= block.topValue
+
+                if priceInside
+                    bear_touch := true
+                    block.touches += 1
+
+                if rejected
+                    bear_reject := true
+
+                updateBoxes(block, time)
+
+    if bullBlocks.size() > obMaxBlocks
+        bullBlocksToRemove = bullBlocks.size() - obMaxBlocks
+
+        for _ = 0 to bullBlocksToRemove - 1
+            if bullBlocks.size() <= 0
+                break
+
+            oldestIdx = 0
+            oldestTime = time_close + 999999999
+
+            for i = 0 to bullBlocks.size() - 1
+                block = bullBlocks.get(i)
+                if block.leftTime < oldestTime
+                    oldestTime := block.leftTime
+                    oldestIdx := i
+
+            if oldestIdx < bullBlocks.size()
+                oldBlock = bullBlocks.get(oldestIdx)
+                wipeBlock(oldBlock)
+                bullBlocks.remove(oldestIdx)
+
+    while bearBlocks.size() > obMaxBlocks
+        oldestIdx = 0
+        oldestTime = time
+
+        for i = 0 to bearBlocks.size() - 1
+            block = bearBlocks.get(i)
+            if block.leftTime < oldestTime
+                oldestTime := block.leftTime
+                oldestIdx := i
+
+        oldBlock = bearBlocks.get(oldestIdx)
+        wipeBlock(oldBlock)
+        bearBlocks.remove(oldestIdx)
+
+// ============================================================================
+// LIQUIDITY ORDER BLOCK TRADE ENGINE
+// ============================================================================
+
+var int obTradeDir = 0
+var float obEntry = na
+var float obSL = na
+var float obTP = na
+var int obEntryBar = na
+var int obEntryTime = na
+var float obEntryStrength = na
+var float obEntryVolume = na
+var string obEntryBlockType = "None"
+
+var line obEntryLine = na
+var line obSLLine = na
+var line obTPLine = na
+var label obEntryLabel = na
+var label obExitLabel = na
+
+var int obTotalTrades = 0
+var int obWins = 0
+var int obLosses = 0
+var int obBuyTrades = 0
+var int obSellTrades = 0
+var int obBuyWins = 0
+var int obSellWins = 0
+var float obNetR = 0.0
+var float obSumWinR = 0.0
+var float obSumLossR = 0.0
+var float obBestR = na
+var float obWorstR = na
+var int obTotalBarsHeld = 0
+var int obTotalMsHeld = 0
+var int obTPStreak = 0
+var int obSLStreak = 0
+var int obBestTPStreak = 0
+var int obWorstSLStreak = 0
+
+volBase = ta.sma(volume, 20)
+
+int buyBlockIdx = -1
+float buyBlockStrength = na
+float buyBlockBot = na
+float buyBlockVol = na
+
+if trade_on and obTradeDir == 0 and bullBlocks.size() > 0
+    for i = bullBlocks.size() - 1 to 0
+        block = bullBlocks.get(i)
+        inside = close <= block.topValue and close >= block.botValue
+        rejected = low <= block.botValue and close >= block.botValue
+        triggered = trade_triggerMode == "Touch" ? inside : rejected
+        strength = volBase > 0 ? block.totalVolume / volBase : 0.0
+
+        if triggered and strength >= trade_minStrength
+            if buyBlockIdx == -1 or strength > buyBlockStrength
+                buyBlockIdx := i
+                buyBlockStrength := strength
+                buyBlockBot := block.botValue
+                buyBlockVol := block.totalVolume
+
+int sellBlockIdx = -1
+float sellBlockStrength = na
+float sellBlockTop = na
+float sellBlockVol = na
+
+if trade_on and obTradeDir == 0 and bearBlocks.size() > 0
+    for i = bearBlocks.size() - 1 to 0
+        block = bearBlocks.get(i)
+        inside = close <= block.topValue and close >= block.botValue
+        rejected = high >= block.topValue and close <= block.topValue
+        triggered = trade_triggerMode == "Touch" ? inside : rejected
+        strength = volBase > 0 ? block.totalVolume / volBase : 0.0
+
+        if triggered and strength >= trade_minStrength
+            if sellBlockIdx == -1 or strength > sellBlockStrength
+                sellBlockIdx := i
+                sellBlockStrength := strength
+                sellBlockTop := block.topValue
+                sellBlockVol := block.totalVolume
+
+buyTradeSignal = trade_on and barstate.isconfirmed and obTradeDir == 0 and buyBlockIdx != -1
+sellTradeSignal = trade_on and barstate.isconfirmed and obTradeDir == 0 and sellBlockIdx != -1 and not buyTradeSignal
+
+if buyTradeSignal
+    obTradeDir := 1
+    obEntry := close
+    obSL := trade_slMode == "Block Edge" ? buyBlockBot : close - atr * trade_slAtr
+    risk = math.abs(obEntry - obSL)
+    obTP := obEntry + risk * trade_rr
+    obEntryBar := bar_index
+    obEntryTime := time
+    obEntryStrength := buyBlockStrength
+    obEntryVolume := buyBlockVol
+    obEntryBlockType := "Bullish OB"
+    obBuyTrades += 1
+
+    if trade_showVisuals
+        obEntryLine := line.new(bar_index, obEntry, bar_index + trade_extendBars, obEntry, color=color.new(color.white, 30), style=line.style_dotted)
+        obSLLine := line.new(bar_index, obSL, bar_index + trade_extendBars, obSL, color=color.new(#f23645, 0), style=line.style_dashed, width=2)
+        obTPLine := line.new(bar_index, obTP, bar_index + trade_extendBars, obTP, color=color.new(#089981, 0), style=line.style_dashed, width=2)
+
+        obEntryLabel := label.new(
+             bar_index,
+             low,
+             "BUY\nE: " + str.tostring(obEntry, format.mintick) +
+             "\nSL: " + str.tostring(obSL, format.mintick) +
+             "\nTP: " + str.tostring(obTP, format.mintick) +
+             "\nStrength: " + str.tostring(obEntryStrength, "#.##") + "x",
+             style=label.style_label_up,
+             color=color.new(#089981, 0),
+             textcolor=color.white,
+             size=size.small)
+
+if sellTradeSignal
+    obTradeDir := -1
+    obEntry := close
+    obSL := trade_slMode == "Block Edge" ? sellBlockTop : close + atr * trade_slAtr
+    risk = math.abs(obEntry - obSL)
+    obTP := obEntry - risk * trade_rr
+    obEntryBar := bar_index
+    obEntryTime := time
+    obEntryStrength := sellBlockStrength
+    obEntryVolume := sellBlockVol
+    obEntryBlockType := "Bearish OB"
+    obSellTrades += 1
+
+    if trade_showVisuals
+        obEntryLine := line.new(bar_index, obEntry, bar_index + trade_extendBars, obEntry, color=color.new(color.white, 30), style=line.style_dotted)
+        obSLLine := line.new(bar_index, obSL, bar_index + trade_extendBars, obSL, color=color.new(#f23645, 0), style=line.style_dashed, width=2)
+        obTPLine := line.new(bar_index, obTP, bar_index + trade_extendBars, obTP, color=color.new(#089981, 0), style=line.style_dashed, width=2)
+
+        obEntryLabel := label.new(
+             bar_index,
+             high,
+             "SELL\nE: " + str.tostring(obEntry, format.mintick) +
+             "\nSL: " + str.tostring(obSL, format.mintick) +
+             "\nTP: " + str.tostring(obTP, format.mintick) +
+             "\nStrength: " + str.tostring(obEntryStrength, "#.##") + "x",
+             style=label.style_label_down,
+             color=color.new(#f23645, 0),
+             textcolor=color.white,
+             size=size.small)
+
+if obTradeDir != 0 and trade_showVisuals
+    if not na(obEntryLine)
+        line.set_x2(obEntryLine, bar_index + trade_extendBars)
+    if not na(obSLLine)
+        line.set_x2(obSLLine, bar_index + trade_extendBars)
+    if not na(obTPLine)
+        line.set_x2(obTPLine, bar_index + trade_extendBars)
+
+bool obExitNow = false
+bool obTPHit = false
+bool obSLHit = false
+float obExitPrice = na
+float obResultR = na
+
+if trade_on and obTradeDir == 1 and bar_index > obEntryBar
+    obTPHit := high >= obTP
+    obSLHit := low <= obSL
+    if obTPHit or obSLHit
+        obExitNow := true
+        obExitPrice := obTPHit and not obSLHit ? obTP : obSL
+        risk = math.abs(obEntry - obSL)
+        obResultR := risk > 0 ? (obExitPrice - obEntry) / risk : 0.0
+
+if trade_on and obTradeDir == -1 and bar_index > obEntryBar
+    obTPHit := low <= obTP
+    obSLHit := high >= obSL
+    if obTPHit or obSLHit
+        obExitNow := true
+        obExitPrice := obTPHit and not obSLHit ? obTP : obSL
+        risk = math.abs(obEntry - obSL)
+        obResultR := risk > 0 ? (obEntry - obExitPrice) / risk : 0.0
+
+if obExitNow and not na(obResultR)
+    barsHeld = bar_index - obEntryBar
+    msHeld = time - obEntryTime
+
+    obTotalTrades += 1
+    obNetR += obResultR
+    obTotalBarsHeld += barsHeld
+    obTotalMsHeld += msHeld
+
+    obBestR := na(obBestR) ? obResultR : math.max(obBestR, obResultR)
+    obWorstR := na(obWorstR) ? obResultR : math.min(obWorstR, obResultR)
+
+    if obResultR > 0
+        obWins += 1
+        obSumWinR += obResultR
+        obTPStreak += 1
+        obSLStreak := 0
+        obBestTPStreak := math.max(obBestTPStreak, obTPStreak)
+
+        if obTradeDir == 1
+            obBuyWins += 1
+        else
+            obSellWins += 1
+    else
+        obLosses += 1
+        obSumLossR += math.abs(obResultR)
+        obSLStreak += 1
+        obTPStreak := 0
+        obWorstSLStreak := math.max(obWorstSLStreak, obSLStreak)
+
+    if trade_showVisuals
+        if trade_keepClosedVisuals
+            if not na(obEntryLine)
+                line.set_x2(obEntryLine, bar_index)
+            if not na(obSLLine)
+                line.set_x2(obSLLine, bar_index)
+            if not na(obTPLine)
+                line.set_x2(obTPLine, bar_index)
+
+            exitText = obResultR > 0 ? "TP" : "SL"
+            obExitLabel := label.new(
+                 bar_index,
+                 obExitPrice,
+                 exitText + "\n" + str.tostring(obResultR, "#.##") + "R\n" + str.tostring(barsHeld) + " bars",
+                 style=obResultR > 0 ? label.style_label_up : label.style_label_down,
+                 color=color.new(color.black, 0),
+                 textcolor=obResultR > 0 ? color.lime : color.red,
+                 size=size.small)
+        else
+            if not na(obEntryLine)
+                line.delete(obEntryLine)
+            if not na(obSLLine)
+                line.delete(obSLLine)
+            if not na(obTPLine)
+                line.delete(obTPLine)
+            if not na(obEntryLabel)
+                label.delete(obEntryLabel)
+
+    obTradeDir := 0
+    obEntry := na
+    obSL := na
+    obTP := na
+    obEntryBar := na
+    obEntryTime := na
+    obEntryStrength := na
+    obEntryVolume := na
+    obEntryBlockType := "None"
+    obEntryLine := na
+    obSLLine := na
+    obTPLine := na
+    obEntryLabel := na
+
+liveBarsHeld = obTradeDir != 0 and not na(obEntryBar) ? bar_index - obEntryBar : na
+liveMsHeld = obTradeDir != 0 and not na(obEntryTime) ? time - obEntryTime : na
+
+var table obStatsTable = na
+
+if showTradeStats and barstate.islast and na(obStatsTable)
+    obStatsTable := table.new(f_pos(statsPosition), 2, 17, bgcolor=tradeTableBg, border_color=tradeBorderCol, border_width=1, frame_color=tradeBorderCol, frame_width=1)
+
+if showTradeStats and barstate.islast and not na(obStatsTable)
+    winRate = obTotalTrades > 0 ? obWins * 100.0 / obTotalTrades : na
+    profitFactor = obSumLossR > 0 ? obSumWinR / obSumLossR : na
+    avgR = obTotalTrades > 0 ? obNetR / obTotalTrades : na
+    avgBars = obTotalTrades > 0 ? obTotalBarsHeld / obTotalTrades : na
+    avgMs = obTotalTrades > 0 ? obTotalMsHeld / obTotalTrades : na
+    buyWR = obBuyTrades > 0 ? obBuyWins * 100.0 / obBuyTrades : na
+    sellWR = obSellTrades > 0 ? obSellWins * 100.0 / obSellTrades : na
+
+    statusText = obTradeDir == 1 ? "BUY ACTIVE" : obTradeDir == -1 ? "SELL ACTIVE" : "FLAT"
+    statusColor = obTradeDir == 1 ? tradeBuyCol : obTradeDir == -1 ? tradeSellCol : tradeMuted
+    liveRisk = obTradeDir != 0 ? math.abs(obEntry - obSL) : na
+    liveR = obTradeDir == 1 and not na(liveRisk) and liveRisk > 0 ? (close - obEntry) / liveRisk : obTradeDir == -1 and not na(liveRisk) and liveRisk > 0 ? (obEntry - close) / liveRisk : na
+    openTradeText = obTradeDir == 1 ? "BUY waiting TP/SL" : obTradeDir == -1 ? "SELL waiting TP/SL" : "No active trade"
+
+    table.clear(obStatsTable, 0, 0, 1, 16)
+
+    f_tradeCell(obStatsTable, 0, 0, "ACTIVE OB TRADE", tradeTitleCol, tradeHeaderBg)
+    table.merge_cells(obStatsTable, 0, 0, 1, 0)
+
+    f_tradeCell(obStatsTable, 0, 1, "Status", tradeMuted, tradeTableBg)
+    f_tradeCell(obStatsTable, 1, 1, statusText, statusColor, tradeTableBg)
+
+    f_tradeCell(obStatsTable, 0, 2, "Open Trade", tradeMuted, tradeTableBg)
+    f_tradeCell(obStatsTable, 1, 2, openTradeText, statusColor, tradeTableBg)
+
+    f_tradeCell(obStatsTable, 0, 3, "Block", tradeMuted, tradeTableBg)
+    f_tradeCell(obStatsTable, 1, 3, obEntryBlockType, tradeTxt, tradeTableBg)
+
+    f_tradeCell(obStatsTable, 0, 4, "Entry / SL / TP", tradeMuted, tradeTableBg)
+    f_tradeCell(obStatsTable, 1, 4, obTradeDir != 0 ? str.tostring(obEntry, format.mintick) + " / " + str.tostring(obSL, format.mintick) + " / " + str.tostring(obTP, format.mintick) : "-", tradeTxt, tradeTableBg)
+
+    f_tradeCell(obStatsTable, 0, 5, "Live R", tradeMuted, tradeTableBg)
+    f_tradeCell(obStatsTable, 1, 5, na(liveR) ? "-" : str.tostring(liveR, "#.##") + "R", na(liveR) or liveR >= 0 ? color.lime : color.red, tradeTableBg)
+
+    f_tradeCell(obStatsTable, 0, 6, "Timer", tradeMuted, tradeTableBg)
+    f_tradeCell(obStatsTable, 1, 6, obTradeDir != 0 ? str.tostring(liveBarsHeld) + " bars / " + f_msToClock(liveMsHeld) : "-", tradeTxt, tradeTableBg)
+
+    f_tradeCell(obStatsTable, 0, 7, "Strength / Volume", tradeMuted, tradeTableBg)
+    f_tradeCell(obStatsTable, 1, 7, na(obEntryStrength) ? "-" : str.tostring(obEntryStrength, "#.##") + "x / " + formatVolume(obEntryVolume), tradeTxt, tradeTableBg)
+
+    f_tradeCell(obStatsTable, 0, 8, "PERFORMANCE", tradeTitleCol, tradeHeaderBg)
+    table.merge_cells(obStatsTable, 0, 8, 1, 8)
+
+    f_tradeCell(obStatsTable, 0, 9, "Trades", tradeMuted, tradeTableBg)
+    f_tradeCell(obStatsTable, 1, 9, str.tostring(obTotalTrades), tradeTxt, tradeTableBg)
+
+    f_tradeCell(obStatsTable, 0, 10, "Wins / Losses", tradeMuted, tradeTableBg)
+    f_tradeCell(obStatsTable, 1, 10, str.tostring(obWins) + " / " + str.tostring(obLosses), tradeTxt, tradeTableBg)
+
+    f_tradeCell(obStatsTable, 0, 11, "Win Rate", tradeMuted, tradeTableBg)
+    f_tradeCell(obStatsTable, 1, 11, na(winRate) ? "-" : str.tostring(winRate, "#.##") + "%", tradeTxt, tradeTableBg)
+
+    f_tradeCell(obStatsTable, 0, 12, "Net R / Avg R", tradeMuted, tradeTableBg)
+    f_tradeCell(obStatsTable, 1, 12, str.tostring(obNetR, "#.##") + " / " + (na(avgR) ? "-" : str.tostring(avgR, "#.##")), obNetR >= 0 ? color.lime : color.red, tradeTableBg)
+
+    f_tradeCell(obStatsTable, 0, 13, "Profit Factor", tradeMuted, tradeTableBg)
+    f_tradeCell(obStatsTable, 1, 13, na(profitFactor) ? "-" : str.tostring(profitFactor, "#.##"), tradeTxt, tradeTableBg)
+
+    f_tradeCell(obStatsTable, 0, 14, "Best / Worst R", tradeMuted, tradeTableBg)
+    f_tradeCell(obStatsTable, 1, 14, (na(obBestR) ? "-" : str.tostring(obBestR, "#.##")) + " / " + (na(obWorstR) ? "-" : str.tostring(obWorstR, "#.##")), tradeTxt, tradeTableBg)
+
+    f_tradeCell(obStatsTable, 0, 15, "Avg Hold", tradeMuted, tradeTableBg)
+    f_tradeCell(obStatsTable, 1, 15, na(avgBars) ? "-" : str.tostring(avgBars, "#") + " bars / " + f_msToClock(avgMs), tradeTxt, tradeTableBg)
+
+    f_tradeCell(obStatsTable, 0, 16, "Buy WR / Sell WR", tradeMuted, tradeTableBg)
+    f_tradeCell(obStatsTable, 1, 16, (na(buyWR) ? "-" : str.tostring(buyWR, "#.#") + "%") + " / " + (na(sellWR) ? "-" : str.tostring(sellWR, "#.#") + "%"), tradeTxt, tradeTableBg)
+
+alertcondition(condition=bull_touch, title="Price Inside Bullish Max Volume Zone")
+alertcondition(condition=bear_touch, title="Price Inside Bearish Max Volume Zone")
+alertcondition(condition=bull_reject, title="Confirmed Rejection Off Bullish Max Volume Zone")
+alertcondition(condition=bear_reject, title="Confirmed Rejection Off Bearish Max Volume Zone")
+alertcondition(condition=new_bull, title="New Bullish Order Block")
+alertcondition(condition=new_bear, title="New Bearish Order Block")
+
+alertcondition(buyTradeSignal, "OB Engine BUY", "{\"event\":\"ENTRY\",\"dir\":\"BUY\",\"ticker\":\"{{ticker}}\",\"tf\":\"{{interval}}\"}")
+alertcondition(sellTradeSignal, "OB Engine SELL", "{\"event\":\"ENTRY\",\"dir\":\"SELL\",\"ticker\":\"{{ticker}}\",\"tf\":\"{{interval}}\"}")
+alertcondition(obExitNow and obResultR > 0, "OB Engine Take Profit", "{\"event\":\"EXIT\",\"result\":\"TP\",\"ticker\":\"{{ticker}}\",\"tf\":\"{{interval}}\"}")
+alertcondition(obExitNow and obResultR <= 0, "OB Engine Stop Loss", "{\"event\":\"EXIT\",\"result\":\"SL\",\"ticker\":\"{{ticker}}\",\"tf\":\"{{interval}}\"}")
