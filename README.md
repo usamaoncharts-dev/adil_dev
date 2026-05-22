@@ -16,34 +16,15 @@ This repository contains a Python bot designed to monitor three separate Binance
 
 ## Setup
 
-1. Create a virtual environment:
-
-```powershell
-python -m venv venv
 .\venv\Scripts\Activate.ps1
-```
 
-2. Install dependencies:
 
-```powershell
-pip install -r requirements.txt
-```
 
-3. Ensure `.env` contains valid Binance API credentials and SMTP settings.
 
-## Usage
-
-Run the bot from the workspace root:
-
-```powershell
 python -m bot.run_bot
-```
 
-Run the Streamlit dashboard from the workspace root or inside the `bot` folder:
-
-```powershell
 streamlit run bot/streamlit_app.py
-```
+
 
 If you are already inside `bot/`, the app still resolves the package root automatically.
 

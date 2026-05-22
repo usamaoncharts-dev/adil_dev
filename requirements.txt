@@ -3,3 +3,6 @@ python-binance
 pandas>=2.0
 numpy
 streamlit
+starlette>=0.40
+anyio>=4.0
+uvicorn>=0.30

@@ -2,8 +2,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-import streamlit as st
 import pandas as pd
+import streamlit as st
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
@@ -11,22 +11,152 @@ if str(ROOT_DIR) not in sys.path:
 
 from bot.config import Config
 from bot.exchange import BinanceDataClient
+from bot.strategies.base_strategy import StrategyResult
 from bot.strategies.main_strategy import MainEMAStrategy
 from bot.strategies.order_block_matrix_strategy import OrderBlockMatrixStrategy
 from bot.strategies.smart_money_orderblock_strategy import SmartMoneyOrderBlockStrategy
-import bot.streamlit_dashboard as dashboard
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=15)
 def load_klines(_client: BinanceDataClient, symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
     return _client.get_klines(symbol, timeframe, limit=limit)
 
 
-def format_result(result, symbol: str, price: float) -> str:
-    return (
-        f'{result.name} | {symbol} | {result.signal.upper()} | score={result.score:.1f}\n'
-        f'price={price:.4f}\n{result.details}'
+def init_state():
+    if 'dashboard_running' not in st.session_state:
+        st.session_state.dashboard_running = False
+    if 'strategy_enabled' not in st.session_state:
+        st.session_state.strategy_enabled = {
+            'Main Strategy': True,
+            'Order Block Matrix': True,
+            'Smart Money Order Block': True,
+        }
+    if 'monitor_logs' not in st.session_state:
+        st.session_state.monitor_logs = []
+    if 'last_refresh' not in st.session_state:
+        st.session_state.last_refresh = None
+
+
+def add_log(message: str, level: str = 'INFO') -> None:
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    entry = f'[{timestamp}] {level.upper()} | {message}'
+    logs = st.session_state.monitor_logs
+    if not logs or logs[0] != entry:
+        logs.insert(0, entry)
+    st.session_state.monitor_logs = logs[:120]
+
+
+def build_strategies(config: Config) -> list:
+    return [
+        MainEMAStrategy(config),
+        OrderBlockMatrixStrategy(config),
+        SmartMoneyOrderBlockStrategy(config),
+    ]
+
+
+def render_sidebar(config: Config):
+    st.sidebar.title('Monitor Controls')
+    st.sidebar.write('Enable/disable each strategy and control dashboard refresh.')
+
+    main_enabled = st.sidebar.checkbox(
+        'Main Strategy',
+        value=st.session_state.strategy_enabled['Main Strategy'],
+        key='enable_main_strategy',
     )
+    ob_enabled = st.sidebar.checkbox(
+        'Order Block Matrix',
+        value=st.session_state.strategy_enabled['Order Block Matrix'],
+        key='enable_order_block_strategy',
+    )
+    smo_enabled = st.sidebar.checkbox(
+        'Smart Money Order Block',
+        value=st.session_state.strategy_enabled['Smart Money Order Block'],
+        key='enable_smart_money_strategy',
+    )
+
+    st.session_state.strategy_enabled['Main Strategy'] = main_enabled
+    st.session_state.strategy_enabled['Order Block Matrix'] = ob_enabled
+    st.session_state.strategy_enabled['Smart Money Order Block'] = smo_enabled
+
+    st.sidebar.markdown('---')
+    if st.sidebar.button('Start All Strategies'):
+        st.session_state.strategy_enabled = {
+            'Main Strategy': True,
+            'Order Block Matrix': True,
+            'Smart Money Order Block': True,
+        }
+        st.session_state.dashboard_running = True
+        st.rerun()
+
+    if st.sidebar.button('Stop All Strategies'):
+        st.session_state.dashboard_running = False
+        st.rerun()
+
+    st.sidebar.markdown('---')
+    st.sidebar.write('Symbol counts:')
+    st.sidebar.write(f'- Main Strategy: `{len(config.symbols_main)}`')
+    st.sidebar.write(f'- Other strategies: `{len(config.symbols)}`')
+    st.sidebar.markdown('---')
+    st.sidebar.write('Note: Logs update when monitoring is active.')
+
+
+def gather_results(config: Config, client: BinanceDataClient) -> dict[str, list[StrategyResult]]:
+    results: dict[str, list[StrategyResult]] = {}
+    strategies = build_strategies(config)
+
+    for strategy in strategies:
+        if not st.session_state.strategy_enabled.get(strategy.name, False):
+            continue
+
+        symbols = config.get_symbols_for_strategy(strategy.name)
+        timeframes = config.get_timeframes_for_strategy(strategy.name)
+        results[strategy.name] = []
+
+        for symbol in symbols:
+            for timeframe in timeframes:
+                try:
+                    df = load_klines(client, symbol, timeframe, limit=config.fetch_limit)
+                    result = strategy.evaluate(df)
+                    result.symbol = symbol
+                    result.timeframe = timeframe
+                    result.price = client.get_live_price(symbol)
+                    results[strategy.name].append(result)
+
+                    if result.signal in {'buy', 'sell'}:
+                        add_log(
+                            f'{strategy.name} | {symbol} | {timeframe} | {result.signal.upper()} | score={result.score:.1f}'
+                        )
+                except Exception as exc:
+                    add_log(
+                        f'{strategy.name} failed for {symbol} {timeframe}: {exc}',
+                        level='ERROR',
+                    )
+
+    st.session_state.last_refresh = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    return results
+
+
+def render_signals(results: dict[str, list[StrategyResult]]):
+    if not results:
+        st.warning('No active strategies selected. Enable a strategy from the sidebar.')
+        return
+
+    for strategy_name, items in results.items():
+        st.subheader(strategy_name)
+        active_signals = [result for result in items if result.signal in {'buy', 'sell'}]
+        if active_signals:
+            for result in active_signals:
+                if result.signal == 'buy':
+                    st.success(f'{result.symbol} | BUY | {result.timeframe} | score={result.score:.1f}')
+                else:
+                    st.error(f'{result.symbol} | SELL | {result.timeframe} | score={result.score:.1f}')
+
+                st.markdown(f'- **Details:** {result.details}')
+                st.markdown(f'- **Price:** `{result.price:.4f}`')
+                st.markdown(f'- **Signal time:** `{result.timestamp.isoformat()}`')
+                st.markdown('---')
+        else:
+            st.info('No active buy/sell signals for this strategy right now.')
 
 
 def render_strategy_page(strategy, symbols, client, config):
@@ -42,6 +172,7 @@ def render_strategy_page(strategy, symbols, client, config):
         price = client.get_live_price(raw_symbol)
         display_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         strategy_results = []
+
         for timeframe in timeframes:
             try:
                 df = load_klines(client, raw_symbol, timeframe, limit=config.fetch_limit)
@@ -91,9 +222,7 @@ def render_strategy_page(strategy, symbols, client, config):
                 if other_results:
                     with st.expander('Other timeframes (no active signal)', expanded=False):
                         for result in other_results:
-                            st.write(
-                                f'{result.timeframe}: {result.signal.upper()} — {result.details}'
-                            )
+                            st.write(f'{result.timeframe}: {result.signal.upper()} — {result.details}')
     else:
         st.info('No active signals found for selected symbols and timeframes.')
 
@@ -233,25 +362,74 @@ def render_documentation_page(config: Config):
     st.info('The documentation page is part of the Streamlit sidebar and provides a quick reference for how each strategy evaluates signals and what the dashboard metrics mean.')
 
 
+def render_dashboard_page(config: Config):
+    init_state()
+    render_sidebar(config)
+
+    st.title('Unified Strategy Dashboard')
+    st.write('Active green signals from all enabled strategies are shown here, with live logs on the right.')
+
+    button_cols = st.columns([1, 1, 1])
+    if button_cols[0].button('Start Monitoring'):
+        st.session_state.dashboard_running = True
+        st.rerun()
+    if button_cols[1].button('Stop Monitoring'):
+        st.session_state.dashboard_running = False
+        st.rerun()
+    if button_cols[2].button('Refresh Now'):
+        st.session_state.last_refresh = None
+        st.rerun()
+
+    status = 'running' if st.session_state.dashboard_running else 'stopped'
+    st.markdown(f'**Status:** {status}')
+    if st.session_state.last_refresh:
+        st.markdown(f'**Last refresh:** {st.session_state.last_refresh}')
+
+    if st.session_state.dashboard_running:
+        st.write('Monitoring is active. Use Refresh Now to update the dashboard.')
+
+    main_col, log_col = st.columns([3, 1])
+
+    with main_col:
+        try:
+            client = BinanceDataClient(config)
+            results = gather_results(config, client) if st.session_state.dashboard_running else {}
+            render_signals(results)
+        except Exception as exc:
+            add_log(f'Dashboard initialization error: {exc}', level='ERROR')
+            st.error(f'Unable to load data: {exc}')
+
+    with log_col:
+        st.subheader('Live Logs')
+        if st.session_state.monitor_logs:
+            st.code('\n'.join(st.session_state.monitor_logs[:80]))
+        else:
+            st.info('Start monitoring to populate logs.')
+
+    st.markdown('---')
+    st.write('Use the sidebar toggles to control each strategy explicitly, or press Start All Strategies to monitor them together.')
+
+
 def main():
+    init_state()
     config = Config.load()
     client = BinanceDataClient(config)
-    strategies = {
-        'Main Strategy': (MainEMAStrategy(config), config.symbols_main or config.symbols),
-        'Order Block Matrix': (OrderBlockMatrixStrategy(config), config.symbols),
-        'Smart Money Order Block': (SmartMoneyOrderBlockStrategy(config), config.symbols),
-    }
+    st.set_page_config(page_title='Strategy Dashboard', layout='wide')
 
-    st.set_page_config(page_title='Binance Strategy Monitor', layout='wide')
-    st.sidebar.title('Strategy Pages')
-    pages = ['Dashboard'] + list(strategies.keys()) + ['Documentation']
-    page = st.sidebar.selectbox('Choose strategy page', pages)
+    pages = ['Dashboard', 'Main Strategy', 'Order Block Matrix', 'Smart Money Order Block', 'Documentation']
+    page = st.sidebar.selectbox('Choose app page', pages, index=0, key='dashboard_page')
+    st.sidebar.markdown('---')
 
     if page == 'Dashboard':
-        dashboard.render_dashboard_page(config)
+        render_dashboard_page(config)
     elif page == 'Documentation':
         render_documentation_page(config)
     else:
+        strategies = {
+            'Main Strategy': (MainEMAStrategy(config), config.symbols_main or config.symbols),
+            'Order Block Matrix': (OrderBlockMatrixStrategy(config), config.symbols),
+            'Smart Money Order Block': (SmartMoneyOrderBlockStrategy(config), config.symbols),
+        }
         strategy, symbols = strategies[page]
         render_strategy_page(strategy, symbols, client, config)
 

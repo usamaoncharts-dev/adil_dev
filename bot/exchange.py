@@ -19,7 +19,6 @@ class BinanceDataClient:
             config.api_key,
             config.api_secret,
             requests_params=requests_params,
-            ping=False,
         )
         self.client.REQUEST_RECVWINDOW = config.request_recv_window
         self.client.REQUEST_TIMEOUT = config.request_timeout
