@@ -15,7 +15,12 @@ class BinanceDataClient:
         self.config = config
         request_timeout = config.request_timeout
         requests_params = {'timeout': (request_timeout, request_timeout)}
-        self.client = Client(config.api_key, config.api_secret, requests_params=requests_params)
+        self.client = Client(
+            config.api_key,
+            config.api_secret,
+            requests_params=requests_params,
+            ping=False,
+        )
         self.client.REQUEST_RECVWINDOW = config.request_recv_window
         self.client.REQUEST_TIMEOUT = config.request_timeout
 

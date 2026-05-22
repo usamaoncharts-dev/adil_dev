@@ -4,6 +4,38 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+try:
+    import streamlit as st
+    STREAMLIT_SECRETS = st.secrets
+except Exception:
+    STREAMLIT_SECRETS = {}
+
+
+def get_secret(key: str, default: str = '') -> str:
+    value = ''
+    try:
+        if STREAMLIT_SECRETS and key in STREAMLIT_SECRETS:
+            value = STREAMLIT_SECRETS[key]
+    except Exception:
+        value = ''
+
+    if value is None or value == '':
+        value = os.getenv(key, default)
+
+    return str(value)
+
+
+def get_bool(key: str, default: bool = False) -> bool:
+    val = get_secret(key, str(default))
+    return str(val).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def get_int(key: str, default: int = 0) -> int:
+    try:
+        return int(get_secret(key, str(default)))
+    except ValueError:
+        return default
+
 
 def parse_symbols(value: str) -> list[str]:
     if not value:
@@ -13,28 +45,28 @@ def parse_symbols(value: str) -> list[str]:
 
 @dataclass
 class Config:
-    exchange_id: str = os.getenv('EXCHANGE_ID', 'binance')
-    market_type: str = os.getenv('MARKET_TYPE', 'futures').lower()
-    api_key: str = os.getenv('API_KEY', '')
-    api_secret: str = os.getenv('API_SECRET', '')
+    exchange_id: str = get_secret('EXCHANGE_ID', 'binance')
+    market_type: str = get_secret('MARKET_TYPE', 'futures').lower()
+    api_key: str = get_secret('API_KEY', '')
+    api_secret: str = get_secret('API_SECRET', '')
 
-    email_enabled: bool = os.getenv('EMAIL_ENABLED', 'false').lower() == 'true'
-    smtp_host: str = os.getenv('EMAIL_SMTP_HOST', 'smtp.gmail.com')
-    smtp_port: int = int(os.getenv('EMAIL_SMTP_PORT', '587'))
-    email_username: str = os.getenv('EMAIL_USERNAME', '')
-    email_password: str = os.getenv('EMAIL_APP_PASSWORD', '')
-    email_from: str = os.getenv('EMAIL_FROM', '')
-    email_to: str = os.getenv('EMAIL_TO', '')
+    email_enabled: bool = get_bool('EMAIL_ENABLED', False)
+    smtp_host: str = get_secret('EMAIL_SMTP_HOST', 'smtp.gmail.com')
+    smtp_port: int = get_int('EMAIL_SMTP_PORT', 587)
+    email_username: str = get_secret('EMAIL_USERNAME', '')
+    email_password: str = get_secret('EMAIL_APP_PASSWORD', '')
+    email_from: str = get_secret('EMAIL_FROM', '')
+    email_to: str = get_secret('EMAIL_TO', '')
 
-    symbols: list[str] = field(default_factory=lambda: parse_symbols(os.getenv('SYMBOLS', '')))
-    symbols_main: list[str] = field(default_factory=lambda: parse_symbols(os.getenv('SYMBOLS_main', '')))
-    timeframe: str = os.getenv('TIMEFRAME', '5m')
-    fetch_limit: int = int(os.getenv('FETCH_LIMIT', '100'))
+    symbols: list[str] = field(default_factory=lambda: parse_symbols(get_secret('SYMBOLS', '')))
+    symbols_main: list[str] = field(default_factory=lambda: parse_symbols(get_secret('SYMBOLS_main', '')))
+    timeframe: str = get_secret('TIMEFRAME', '5m')
+    fetch_limit: int = get_int('FETCH_LIMIT', 100)
     timeframes_main: list[str] = field(default_factory=lambda: ['5m'])
     timeframes_indicators: list[str] = field(default_factory=lambda: ['15m', '1h', '4h'])
-    request_timeout: int = int(os.getenv('REQUEST_TIMEOUT', '20'))
-    request_recv_window: int = int(os.getenv('REQUEST_RECV_WINDOW', '20000'))
-    max_retries: int = int(os.getenv('REQUEST_MAX_RETRIES', '3'))
+    request_timeout: int = get_int('REQUEST_TIMEOUT', 20)
+    request_recv_window: int = get_int('REQUEST_RECV_WINDOW', 20000)
+    max_retries: int = get_int('REQUEST_MAX_RETRIES', 3)
 
     @classmethod
     def load(cls) -> 'Config':

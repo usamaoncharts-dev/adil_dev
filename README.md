@@ -49,6 +49,29 @@ If you are already inside `bot/`, the app still resolves the package root automa
 
 > The Streamlit dashboard includes a built-in **Documentation** page in the sidebar that explains each strategy and the metrics used.
 
+## Streamlit Cloud deployment
+
+Streamlit Cloud uses TOML-formatted secrets, not a `.env` file. Do not upload your `.env` directly. Instead:
+
+1. Create a `secrets.toml` file in the `.streamlit/` folder, or use the Streamlit Cloud Secrets editor.
+2. Use valid TOML syntax, for example:
+
+```toml
+API_KEY = "your_binance_api_key"
+API_SECRET = "your_binance_api_secret"
+EMAIL_ENABLED = true
+EMAIL_SMTP_HOST = "smtp.gmail.com"
+EMAIL_SMTP_PORT = 587
+EMAIL_USERNAME = "your_email@gmail.com"
+EMAIL_APP_PASSWORD = "your_app_password"
+EMAIL_FROM = "your_email@gmail.com"
+EMAIL_TO = "your_email@gmail.com"
+SYMBOLS = "BTC/USDT,ETH/USDT,SOL/USDT"
+SYMBOLS_main = "BNB/USDT,XRP/USDT,PYTH/USDT"
+```
+
+3. Keep real secrets out of GitHub by using `.streamlit/secrets.toml` only locally or the Streamlit Cloud Secrets UI.
+
 ## Notes
 
 - Each strategy is kept separate and uses its own evaluation logic.
