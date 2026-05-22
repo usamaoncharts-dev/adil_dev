@@ -45,6 +45,8 @@ def format_email_body(result, symbol: str, price: float, timeframe: str, market_
         'Details:\n'
         f'{result.details}\n'
         '\n'
+        'Score explanation: internal strength value, higher is stronger, not a probability.\n'
+        '\n'
         '---\n'
         f'Refresh interval: {timeframe}\n'
         f'Market type: {market_type}\n'

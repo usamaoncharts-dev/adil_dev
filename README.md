@@ -47,6 +47,8 @@ streamlit run bot/streamlit_app.py
 
 If you are already inside `bot/`, the app still resolves the package root automatically.
 
+> The Streamlit dashboard includes a built-in **Documentation** page in the sidebar that explains each strategy and the metrics used.
+
 ## Notes
 
 - Each strategy is kept separate and uses its own evaluation logic.
